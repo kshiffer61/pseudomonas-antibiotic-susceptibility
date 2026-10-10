@@ -1,0 +1,175 @@
+---
+title: "Antibiotic coverage comparisons for Pseudomonas aeruginosa"
+output: html_document
+---
+
+Compare five frequently tested drugs in Basel respiratory samples, using
+added coverage, conditional rescue, and total coverage. The analysis retains
+the same data preparation as Main_Analysis.Rmd.
+
+## Data and testing frequency
+
+```{r setup}
+library(dplyr)
+library(ggplot2)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, fig.width = 8,
+                      fig.height = 4.5, dpi = 200,
+                      fig.path = "outputs/figures/comparison_")
+theme_set(theme_classic())
+source("scripts/prepare_data.R")
+prepared <- prepare_data()
+wide <- prepared$order_data
+frequency <- prepared$frequency
+top_five <- head(frequency$drug, 5)
+knitr::kable(head(frequency, 5))
+```
+
+```{r testing-availability}
+availability <- data.frame(
+  Drug = top_five,
+  Orders = sapply(top_five, function(drug) sum(!is.na(wide[[drug]]))),
+  Total_orders = nrow(wide))
+availability$Percent <- 100 * availability$Orders / availability$Total_orders
+availability$Label <- ifelse(availability$Drug == "Piperacillin-tazobactam",
+                             "Pip-tazo", availability$Drug)
+
+par(mar = c(5, 8, 3, 1))
+plot(availability$Percent, seq_len(5), xlim = c(0, 105), ylim = c(0.6, 5.4), yaxt = "n", pch = 19,
+     xlab = "Orders with a clear result (%)", ylab = "",
+     main = "Testing availability")
+axis(2, at = seq_len(5), labels = availability$Label, las = 1, cex.axis = 0.85)
+text(availability$Percent - 2, seq_len(5),
+     labels = paste0(availability$Orders, "/", availability$Total_orders), pos = 2)
+```
+
+The five drugs were selected by testing frequency. Missing results differ by
+drug, so pair comparisons below use a shared complete-case cohort.
+
+## Common comparison sample
+
+```{r common-sample}
+complete_orders <- wide[complete.cases(wide[, top_five]), ]
+samples <- first_eligible(wide, top_five)
+knitr::kable(data.frame(
+  Stage = c("Respiratory orders", "All five results available", "First eligible order per patient-year"),
+  N = c(nrow(wide), nrow(complete_orders), nrow(samples))))
+
+single <- data.frame(
+  Drug = top_five,
+  Susceptible = sapply(top_five, function(drug) sum(samples[[drug]] == 0)),
+  N = nrow(samples))
+single$Coverage_percent <- 100 * single$Susceptible / single$N
+knitr::kable(single, digits = 1, row.names = FALSE)
+```
+
+All comparisons use `r nrow(samples)` patient-year observations. Requiring all
+five results can select a later first eligible order than the two-drug analysis,
+so this is not simply the 350-sample cohort with one observation removed.
+
+## Pair summaries
+
+For each ordered pair: N = all samples, M = first-drug NS, Y = first-drug NS
+and second-drug S. Conditional rescue is Y/M, added coverage is Y/N, and total
+coverage is (N-M+Y)/N.
+
+```{r pair-summaries}
+pair_summary <- function(data, first, second) {
+  N <- nrow(data)
+  M <- sum(data[[first]] == 1)
+  Y <- sum(data[[first]] == 1 & data[[second]] == 0)
+  data.frame(First = first, Second = second, N = N, Missed = M, Rescued = Y,
+             First_percent = 100 * (N - M) / N,
+             Conditional_percent = if (M > 0) 100 * Y / M else NA_real_,
+             Added_points = 100 * Y / N,
+             Combined_percent = 100 * (N - M + Y) / N)
+}
+pairs <- expand.grid(First = top_five, Second = top_five, stringsAsFactors = FALSE)
+pairs <- pairs[pairs$First != pairs$Second, ]
+comparison <- bind_rows(lapply(seq_len(nrow(pairs)), function(i) {
+  pair_summary(samples, pairs$First[i], pairs$Second[i])
+}))
+```
+
+## Combinations from different drug families
+
+Pip-tazo and meropenem are the beta-lactam starting drugs; the additions are
+colistin (polymyxin), tobramycin (aminoglycoside), and cipro (fluoroquinolone).
+This filter groups the two beta-lactam subgroups in EDA Table 4 together.
+
+```{r class-filter}
+first_drugs <- c("Piperacillin-tazobactam", "Meropenem")
+second_drugs <- top_five[!top_five %in% first_drugs]
+class_pairs <- comparison |>
+  filter(First %in% first_drugs, Second %in% second_drugs)
+knitr::kable(class_pairs |> select(First, Second, N, Missed, Rescued,
+                                  Conditional_percent, Added_points, Combined_percent), digits = 1)
+
+plot_data <- class_pairs
+plot_data$First <- factor(ifelse(plot_data$First == "Piperacillin-tazobactam",
+                                  "Pip-tazo", plot_data$First),
+                           levels = c("Meropenem", "Pip-tazo"))
+plot_data$Second <- factor(plot_data$Second, levels = second_drugs)
+```
+
+```{r added-coverage}
+added_plot <- ggplot(plot_data, aes(Second, First, fill = Added_points)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.1f", Added_points))) +
+  scale_fill_gradient(low = "white", high = "steelblue", limits = c(0, 20)) +
+  labs(title = "Added coverage by antibiotic pair", x = "Second drug", y = "First drug",
+       fill = "Percentage\npoints") +
+  theme_classic()
+added_plot
+```
+
+```{r total-coverage}
+total_plot <- ggplot(plot_data, aes(Second, First, fill = Combined_percent)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.1f%%", Combined_percent)), color = "white") +
+  scale_fill_gradient(low = "white", high = "steelblue", limits = c(0, 100)) +
+  labs(title = "Total coverage by antibiotic pair", x = "Second drug", y = "First drug",
+       fill = "Coverage\n(%)") +
+  theme_classic()
+total_plot
+```
+
+Colistin adds the most observed coverage after either starting drug in this
+sample. These are historical susceptibility estimates; the comparison does
+not assess prescribing suitability, treatment effects, or clinical outcomes.
+
+## Pairwise availability sensitivity check
+
+```{r sensitivity}
+pairwise <- bind_rows(lapply(seq_len(nrow(class_pairs)), function(i) {
+  first <- class_pairs$First[i]
+  second <- class_pairs$Second[i]
+  pair_summary(first_eligible(wide, c(first, second)), first, second)
+}))
+sensitivity <- merge(class_pairs[, c("First", "Second", "N", "Added_points")],
+                     pairwise[, c("First", "Second", "N", "Added_points")],
+                     by = c("First", "Second"), suffixes = c("_common", "_pairwise"))
+sensitivity$Change_points <- sensitivity$Added_points_pairwise - sensitivity$Added_points_common
+knitr::kable(sensitivity, digits = 2)
+```
+
+Using each pair's available samples retains more observations; the observed
+ordering of the three additions is unchanged for either starting drug.
+The full set of 20 directional comparisons is exported to CSV.
+
+## Limitations
+
+Complete testing may select a different population, and patient labels cannot
+be linked across years. Sample rankings and 100% observed coverage do not
+establish population rankings or guaranteed coverage in future samples.
+
+```{r exports, include=FALSE}
+stopifnot(nrow(samples) == 349, nrow(comparison) == 20, nrow(class_pairs) == 6,
+          all(class_pairs$Rescued <= class_pairs$Missed),
+          all(abs(comparison$First_percent + comparison$Added_points - comparison$Combined_percent) < 1e-10))
+dir.create("outputs/tables", recursive = TRUE, showWarnings = FALSE)
+write.csv(frequency, "outputs/tables/testing_frequency.csv", row.names = FALSE)
+write.csv(comparison, "outputs/tables/all_twenty_pairs.csv", row.names = FALSE)
+write.csv(class_pairs, "outputs/tables/class_filtered_pairs.csv", row.names = FALSE)
+write.csv(pairwise, "outputs/tables/pairwise_sensitivity.csv", row.names = FALSE)
+write.csv(availability[, 1:4], "outputs/tables/testing_availability.csv", row.names = FALSE)
+```

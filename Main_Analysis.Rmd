@@ -1,0 +1,170 @@
+---
+title: "Antibiotic susceptibility in respiratory Pseudomonas aeruginosa"
+output: html_document
+---
+
+Basel laboratory data, 2015-2018. This analysis estimates ciprofloxacin
+susceptibility conditional on piperacillin-tazobactam results and the added
+coverage of the pair. S = susceptible; NS = nonsusceptible.
+
+## Data preparation
+
+The shared script reads pinned public files and collapses repeated measurements
+to one result per laboratory order. Mixed or conflicting clear results are
+unclassified; see `scripts/prepare_data.R` for the cleaning code.
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, fig.width = 7,
+                      fig.height = 4.5, dpi = 200,
+                      fig.path = "outputs/figures/main_")
+source("scripts/prepare_data.R")
+prepared <- prepare_data()
+orders <- prepared$order_data
+
+drugs <- c("Piperacillin-tazobactam", "Ciprofloxacin")
+eligible <- orders[complete.cases(orders[, drugs]), ]
+samples <- first_eligible(orders, drugs)
+samples$pip_NS <- samples$`Piperacillin-tazobactam` == 1
+samples$cipro_S <- samples$Ciprofloxacin == 0
+
+knitr::kable(data.frame(
+  Stage = c("Respiratory orders", "Both results available", "First eligible order per patient-year"),
+  N = c(nrow(orders), nrow(eligible), nrow(samples))))
+```
+
+The analysis keeps each patient's first eligible order per year, giving
+`r nrow(samples)` patient-year observations. Patient labels cannot be linked
+across years.
+
+## Joint and conditional probabilities
+
+```{r joint-table}
+joint <- table(
+  Pip_tazo = factor(samples$pip_NS, levels = c(FALSE, TRUE), labels = c("S", "NS")),
+  Cipro = factor(samples$cipro_S, levels = c(TRUE, FALSE), labels = c("S", "NS")))
+knitr::kable(addmargins(joint))
+
+A <- samples$pip_NS
+B <- samples$cipro_S
+N <- nrow(samples)
+M <- sum(A)
+Y <- sum(A & B)
+```
+
+```{r joint-conditioning, fig.height=5.5}
+set.seed(651)
+x <- jitter(as.integer(A), amount = 0.16)
+y <- jitter(as.integer(B), amount = 0.16)
+
+plot(x, y, type = "n", xlim = c(-0.4, 1.4), ylim = c(-0.4, 1.4),
+     axes = FALSE, xlab = "Pip-tazo result", ylab = "Ciprofloxacin result",
+     main = "Joint susceptibility results")
+rect(0.7, -0.4, 1.3, 1.4, col = adjustcolor("blue", 0.14), border = NA)
+rect(-0.4, 0.7, 1.4, 1.3, col = adjustcolor("red", 0.14), border = NA)
+points(x, y, pch = 16, cex = 0.7, col = adjustcolor("navy", 0.5))
+axis(1, at = 0:1, labels = c("S", "NS"))
+axis(2, at = 0:1, labels = c("NS", "S"), las = 1)
+box()
+text(c(0, 1, 0, 1), c(0.25, 0.25, 1.25, 1.25),
+     labels = paste("n =", c(joint["S", "NS"], joint["NS", "NS"],
+                             joint["S", "S"], joint["NS", "S"])))
+```
+
+The vertical blue band is A = pip-tazo NS; the horizontal red band is B = cipro S.
+Their overlap contains `r Y` samples; jitter only separates points and all
+probabilities use the original binary results.
+
+```{r conditional-probabilities}
+overall <- mean(B)
+given_pip_S <- mean(B[!A])
+q_hat <- mean(B[A])
+probabilities <- data.frame(
+  Group = c("All samples", "Pip-tazo S", "Pip-tazo NS"),
+  Cipro_S = c(sum(B), sum(B & !A), Y),
+  Total = c(N, sum(!A), M),
+  Probability = c(overall, given_pip_S, q_hat))
+knitr::kable(probabilities, digits = 3)
+```
+
+```{r conditional-proportions}
+proportions <- prop.table(t(joint), margin = 2)
+barplot(100 * proportions, col = c("steelblue", "grey85"),
+        ylim = c(0, 115), xlab = "Pip-tazo result", ylab = "Cipro result (%)",
+        main = "Cipro susceptibility within pip-tazo groups",
+        legend.text = c("Cipro S", "Cipro NS"),
+        args.legend = list(x = "top", horiz = TRUE, bty = "n"))
+```
+
+Cipro was S in `r round(100 * overall, 1)`% of all samples and
+`r round(100 * q_hat, 1)`% of pip-tazo NS samples (34/56).
+
+## Added coverage
+
+P(A and B) = P(A) P(B given A). Added coverage uses all N samples as its
+denominator, while conditional rescue uses the M samples missed by pip-tazo.
+
+```{r coverage}
+r_hat <- M / N
+added <- Y / N
+first_coverage <- mean(!A)
+combined_coverage <- mean(!A | B)
+
+coverage <- data.frame(
+  Quantity = c("Pip-tazo S", "Cipro S given pip-tazo NS", "Added coverage", "Combined coverage"),
+  Numerator = c(sum(!A), Y, Y, sum(!A | B)),
+  Denominator = c(N, M, N, N),
+  Percent = 100 * c(first_coverage, q_hat, added, combined_coverage))
+knitr::kable(coverage, digits = 1)
+
+knitr::kable(data.frame(
+  Method = c("Assuming independent drug results", "Observed joint results"),
+  Added_points = 100 * c(r_hat * overall, added)), digits = 1)
+```
+
+The pair covered `r round(100 * combined_coverage, 1)`% of samples, an increase
+of `r round(100 * added, 1)` percentage points. Assuming independence would
+overestimate the observed gain.
+
+## Maximum likelihood
+
+Model M as Binomial(N, r) and Y given M as Binomial(M, q); the MLEs are
+r = M/N and q = Y/M. This assumes approximately independent patient-year
+observations with common probabilities across the period.
+
+```{r likelihood-heatmap}
+r_values <- seq(0.05, 0.30, length.out = 150)
+q_values <- seq(0.25, 0.90, length.out = 150)
+log_likelihood <- outer(dbinom(M, N, r_values, log = TRUE),
+                        dbinom(Y, M, q_values, log = TRUE), "+")
+maximum <- dbinom(M, N, r_hat, log = TRUE) + dbinom(Y, M, q_hat, log = TRUE)
+relative_likelihood <- exp(log_likelihood - maximum)
+
+par(mar = c(5, 5, 3, 1))
+image(100 * r_values, 100 * q_values, relative_likelihood,
+      col = colorRampPalette(c("white", "steelblue"))(50),
+      xlab = "r: pip-tazo NS (%)", ylab = "q: cipro S given pip-tazo NS (%)",
+      main = "Relative likelihood for r and q")
+points(100 * r_hat, 100 * q_hat, pch = 4, cex = 1.3)
+legend("topright", sprintf("MLE: r = %.1f%%, q = %.1f%%", 100*r_hat, 100*q_hat),
+       bty = "n", cex = 0.85)
+```
+
+Darker cells have higher likelihood relative to the maximum; the cross marks
+the MLE. The colors describe fit to the observed counts, not probabilities
+that the parameter values are true.
+
+## Scope
+
+Coverage describes historical laboratory susceptibility, not clinical recovery
+or treatment effects. Missing testing, selection of eligible samples, and
+unlinked patient labels across years limit generalization.
+
+```{r exports, include=FALSE}
+stopifnot(N == 350, M == 56, Y == 34, joint["S", "S"] == 253,
+          isTRUE(all.equal(added, r_hat * q_hat)),
+          isTRUE(all.equal(first_coverage + added, combined_coverage)))
+dir.create("outputs/tables", recursive = TRUE, showWarnings = FALSE)
+write.csv(probabilities, "outputs/tables/main_conditional_probabilities.csv", row.names = FALSE)
+write.csv(data.frame(N, M, Y, r_hat, q_hat, added), "outputs/tables/main_counts.csv", row.names = FALSE)
+write.csv(coverage, "outputs/tables/main_coverage.csv", row.names = FALSE)
+```
